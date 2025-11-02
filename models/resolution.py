@@ -1,50 +1,78 @@
-"""Model name resolution and legacy parsing"""
+"""Model name resolution for OpenAI GPT-5 Codex"""
 
-from typing import Optional, Tuple
+from typing import Tuple, Optional
 import logging
 
-from .registry import MODEL_REGISTRY
-from .reasoning import REASONING_BUDGET_MAP
+from .registry import MODEL_REGISTRY, REASONING_EFFORT_LEVELS
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_legacy_model_name(model_name: str) -> Tuple[str, Optional[str], bool]:
+def resolve_model_metadata(model_name: str) -> Tuple[str, str, str]:
     """
-    Parse legacy Anthropic model names with -1m / -reasoning suffixes.
+    Resolve model name to Codex API ID and configuration.
+
+    Args:
+        model_name: User-provided model name (e.g., "gpt-5-codex", "gpt-5-codex-reasoning-high")
+
+    Returns:
+        Tuple of (codex_id, reasoning_effort, text_verbosity)
+
+    Examples:
+        >>> resolve_model_metadata("gpt-5-codex")
+        ("gpt-5-codex", "medium", "medium")
+
+        >>> resolve_model_metadata("gpt-5-codex-reasoning-high")
+        ("gpt-5-codex", "high", "medium")
+
+        >>> resolve_model_metadata("gpt-5")
+        ("gpt-5", "medium", "low")
     """
-    use_1m_context = False
-    reasoning_level: Optional[str] = None
-    base_model = model_name
-
-    if "-1m" in base_model:
-        use_1m_context = True
-        base_model = base_model.replace("-1m", "")
-
-    if "-reasoning-" in base_model:
-        parts = base_model.rsplit("-reasoning-", 1)
-        base_model = parts[0]
-        maybe_level = parts[1] if len(parts) > 1 else None
-        if maybe_level in REASONING_BUDGET_MAP:
-            reasoning_level = maybe_level
-        else:
-            logger.warning(
-                "Invalid reasoning level in legacy model name '%s'. Valid levels: %s",
-                model_name,
-                list(REASONING_BUDGET_MAP.keys()),
-            )
-
-    return base_model, reasoning_level, use_1m_context
-
-
-def resolve_model_metadata(model_name: str) -> Tuple[str, Optional[str], bool]:
-    """
-    Resolve an incoming model name to (anthropic_id, reasoning_level, use_1m_context).
-    Supports both the new OpenAI-compatible ids and legacy Anthropic ids.
-    """
+    # Look up in registry
     entry = MODEL_REGISTRY.get(model_name)
-    if entry:
-        return entry.anthropic_id, entry.reasoning_level, entry.use_1m_context
 
-    base_model, reasoning_level, use_1m_context = _parse_legacy_model_name(model_name)
-    return base_model, reasoning_level, use_1m_context
+    if entry:
+        return (
+            entry.codex_id,
+            entry.reasoning_effort,
+            entry.text_verbosity,
+        )
+
+    # Try parsing reasoning suffix (e.g., "gpt-5-codex-reasoning-high")
+    if "-reasoning-" in model_name:
+        parts = model_name.rsplit("-reasoning-", 1)
+        base_model = parts[0]
+        reasoning_level = parts[1] if len(parts) > 1 else None
+
+        if reasoning_level in REASONING_EFFORT_LEVELS:
+            # Look up base model
+            base_entry = MODEL_REGISTRY.get(base_model)
+            if base_entry:
+                return (
+                    base_entry.codex_id,
+                    reasoning_level,
+                    base_entry.text_verbosity,
+                )
+
+        logger.warning(
+            "Invalid reasoning level in model name '%s'. Valid levels: %s",
+            model_name,
+            REASONING_EFFORT_LEVELS,
+        )
+
+    # Fallback: Unknown model, use as-is with defaults
+    logger.info("Unknown model '%s', using as-is with default config", model_name)
+    return (model_name, "medium", "medium")
+
+
+def get_model_entry(model_name: str) -> Optional[object]:
+    """
+    Get the full model registry entry.
+
+    Args:
+        model_name: Model name to look up
+
+    Returns:
+        ModelRegistryEntry if found, None otherwise
+    """
+    return MODEL_REGISTRY.get(model_name)

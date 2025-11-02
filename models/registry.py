@@ -1,15 +1,17 @@
-"""Model registry for managing available models"""
+"""Model registry for OpenAI GPT-5 Codex models"""
 
 from typing import Dict, List
 import logging
 
 from .specifications import ModelRegistryEntry, BASE_MODELS
-from .reasoning import REASONING_BUDGET_MAP
 
 logger = logging.getLogger(__name__)
 
 MODEL_REGISTRY: Dict[str, ModelRegistryEntry] = {}
 OPENAI_MODELS_LIST: List[Dict[str, int | str | bool]] = []
+
+# Reasoning effort levels for GPT-5 Codex
+REASONING_EFFORT_LEVELS = ["minimal", "low", "medium", "high"]
 
 
 def _register_model(entry: ModelRegistryEntry) -> None:
@@ -26,69 +28,52 @@ def _register_model(entry: ModelRegistryEntry) -> None:
 def _build_registry() -> None:
     """Build the model registry from base models"""
     for base in BASE_MODELS:
-        # Base entry (no reasoning)
+        # Base entry (default reasoning effort)
         base_entry = ModelRegistryEntry(
             openai_id=base.openai_id,
-            anthropic_id=base.anthropic_id,
+            codex_id=base.codex_id,
             created=base.created,
             owned_by=base.owned_by,
             context_length=base.context_length,
             max_completion_tokens=base.max_completion_tokens,
-            supports_vision=base.supports_vision,
-            use_1m_context=base.use_1m_context,
+            reasoning_effort=base.reasoning_effort,
+            text_verbosity=base.text_verbosity,
+            supports_reasoning=base.supports_reasoning,
         )
         _register_model(base_entry)
 
-        # Reasoning variants for OpenAI-friendly ids
+        # Reasoning effort variants (e.g., gpt-5-codex-reasoning-low)
         if base.supports_reasoning:
-            for level, budget in REASONING_BUDGET_MAP.items():
+            for effort_level in REASONING_EFFORT_LEVELS:
                 reasoning_entry = ModelRegistryEntry(
-                    openai_id=f"{base.openai_id}-reasoning-{level}",
-                    anthropic_id=base.anthropic_id,
+                    openai_id=f"{base.openai_id}-reasoning-{effort_level}",
+                    codex_id=base.codex_id,
                     created=base.created,
                     owned_by=base.owned_by,
                     context_length=base.context_length,
                     max_completion_tokens=base.max_completion_tokens,
-                    reasoning_level=level,
-                    reasoning_budget=budget,
-                    supports_vision=base.supports_vision,
-                    use_1m_context=base.use_1m_context,
+                    reasoning_effort=effort_level,
+                    text_verbosity=base.text_verbosity,
+                    supports_reasoning=True,
                 )
                 _register_model(reasoning_entry)
 
-        # Alias for Anthropic native id (no listing)
-        _register_model(
-            ModelRegistryEntry(
-                openai_id=base.anthropic_id,
-                anthropic_id=base.anthropic_id,
-                created=base.created,
-                owned_by=base.owned_by,
-                context_length=base.context_length,
-                max_completion_tokens=base.max_completion_tokens,
-                supports_vision=base.supports_vision,
-                include_in_listing=False,
-                use_1m_context=base.use_1m_context,
-            )
-        )
-
-        # Alias for Anthropic-style reasoning ids (no listing)
-        if base.supports_reasoning:
-            for level, budget in REASONING_BUDGET_MAP.items():
-                _register_model(
-                    ModelRegistryEntry(
-                        openai_id=f"{base.anthropic_id}-reasoning-{level}",
-                        anthropic_id=base.anthropic_id,
-                        created=base.created,
-                        owned_by=base.owned_by,
-                        context_length=base.context_length,
-                        max_completion_tokens=base.max_completion_tokens,
-                        reasoning_level=level,
-                        reasoning_budget=budget,
-                        supports_vision=base.supports_vision,
-                        include_in_listing=False,
-                        use_1m_context=base.use_1m_context,
-                    )
+        # Alias for Codex API id (no listing)
+        if base.openai_id != base.codex_id:
+            _register_model(
+                ModelRegistryEntry(
+                    openai_id=base.codex_id,
+                    codex_id=base.codex_id,
+                    created=base.created,
+                    owned_by=base.owned_by,
+                    context_length=base.context_length,
+                    max_completion_tokens=base.max_completion_tokens,
+                    reasoning_effort=base.reasoning_effort,
+                    text_verbosity=base.text_verbosity,
+                    supports_reasoning=base.supports_reasoning,
+                    include_in_listing=False,
                 )
+            )
 
 
 # Build the registry on module import
