@@ -5,8 +5,8 @@ import argparse
 import __main__
 from rich.console import Console
 import settings
-from oauth import OAuthManager
-from cli.cli_app import AnthropicProxyCLI
+from openai_oauth import TokenManager
+from cli.cli_app import OpenAIProxyCLI
 
 
 console = Console()
@@ -14,7 +14,7 @@ console = Console()
 
 def main():
     """Entry point for the CLI"""
-    parser = argparse.ArgumentParser(description="Anthropic Claude Max Proxy CLI")
+    parser = argparse.ArgumentParser(description="OpenAI ChatGPT Max Proxy CLI")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug logging")
     parser.add_argument("--debug-sse", action="store_true", help="Enable detailed SSE event logging")
     parser.add_argument("--bind", "-b", default=None, help="Override bind address (default: from config)")
@@ -30,20 +30,14 @@ def main():
         help="Run in headless mode (non-interactive, requires authentication)"
     )
     parser.add_argument(
-        "--token",
-        type=str,
-        default=None,
-        help="Provide long-term OAuth token for headless mode (format: sk-ant-oat01-...)"
-    )
-    parser.add_argument(
         "--no-auto-start",
         action="store_true",
         help="Don't automatically start server in headless mode"
     )
     parser.add_argument(
-        "--setup-token",
+        "--reauthenticate",
         action="store_true",
-        help="Setup a long-term OAuth token and exit"
+        help="Force re-authentication (clear existing tokens)"
     )
 
     args = parser.parse_args()
@@ -60,31 +54,18 @@ def main():
     settings.STREAM_TRACE_ENABLED = stream_trace_setting
 
     try:
-        cli = AnthropicProxyCLI(
+        cli = OpenAIProxyCLI(
             debug=args.debug,
             debug_sse=args.debug_sse,
             bind_address=args.bind,
             stream_trace_enabled=stream_trace_setting
         )
 
-        # Handle token from CLI argument or environment variable
-        token_to_use = args.token or settings.ANTHROPIC_OAUTH_TOKEN
-        if token_to_use:
-            # Validate token format
-            if OAuthManager.validate_token_format(token_to_use):
-                console.print("[green]✓ Valid OAuth token provided, saving...[/green]")
-                cli.storage.save_long_term_token(token_to_use)
-                if args.debug and hasattr(__main__, '_proxy_debug_logger'):
-                    __main__._proxy_debug_logger.debug("[CLI] Long-term token saved from CLI/env")
-            else:
-                console.print("[red]ERROR:[/red] Invalid token format. Expected format: sk-ant-oat01-...")
-                sys.exit(1)
-
-        # Handle setup-token command
-        if args.setup_token:
-            from cli.auth_handlers import setup_long_term_token
-            setup_long_term_token(cli.storage, cli.auth_flow, cli.loop, cli.console, cli.debug)
-            sys.exit(0)
+        # Handle reauthentication
+        if args.reauthenticate:
+            console.print("[yellow]Clearing existing tokens...[/yellow]")
+            cli.token_manager.clear_tokens()
+            console.print("[green]✓ Tokens cleared. Please authenticate again.[/green]")
 
         # Run in headless or interactive mode
         if args.headless:

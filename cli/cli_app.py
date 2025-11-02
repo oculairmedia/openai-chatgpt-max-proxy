@@ -1,41 +1,27 @@
-"""Main CLI application class"""
+"""Main CLI application class for OpenAI ChatGPT Proxy"""
 
 import asyncio
 import threading
+import webbrowser
 from typing import Optional
-from rich.prompt import Prompt
-from utils.storage import TokenStorage
-from oauth import OAuthManager
-from auth_cli import CLIAuthFlow
-from chatgpt_oauth import ChatGPTOAuthManager, ChatGPTTokenStorage
-from chatgpt_auth_cli import ChatGPTCLIAuthFlow
+from rich.console import Console
+from rich.prompt import Prompt, Confirm
+from rich.panel import Panel
+from rich.table import Table
+
+from openai_oauth import (
+    TokenManager,
+    create_authorization_flow,
+    start_callback_server,
+    exchange_code_for_tokens,
+    REDIRECT_URI,
+)
 from proxy import ProxyServer
 from cli.debug_setup import setup_debug_console
-from cli.menu import (
-    clear_screen,
-    display_header,
-    display_menu,
-    display_auth_menu,
-    display_provider_auth_menu
-)
-from cli.status_display import show_token_status
-from cli.auth_handlers import (
-    login,
-    refresh_token,
-    logout,
-    setup_long_term_token,
-    login_chatgpt,
-    refresh_chatgpt_token,
-    logout_chatgpt,
-)
-from cli.server_handlers import start_proxy_server, stop_proxy_server
-from cli.headless import run_headless
 
 
-class AnthropicProxyCLI:
-    """Main CLI interface for LLM Subscription Proxy"""
-
-    MAX_RETRIES = 3  # Maximum number of retry attempts for network errors
+class OpenAIProxyCLI:
+    """Main CLI interface for OpenAI ChatGPT Max Proxy"""
 
     def __init__(
         self,
@@ -44,16 +30,7 @@ class AnthropicProxyCLI:
         bind_address: str = None,
         stream_trace_enabled: bool = False
     ):
-        # Anthropic/Claude
-        self.storage = TokenStorage()
-        self.oauth = OAuthManager()
-        self.auth_flow = CLIAuthFlow()
-
-        # ChatGPT
-        self.chatgpt_storage = ChatGPTTokenStorage()
-        self.chatgpt_oauth = ChatGPTOAuthManager()
-        self.chatgpt_auth_flow = ChatGPTCLIAuthFlow()
-
+        self.token_manager = TokenManager()
         self.proxy_server = ProxyServer(
             debug=debug,
             debug_sse=debug_sse,
@@ -66,165 +43,254 @@ class AnthropicProxyCLI:
         self.bind_address = bind_address or self.proxy_server.bind_address
         self.stream_trace_enabled = stream_trace_enabled
 
-        # Configure debug console if debug mode is enabled
+        # Configure debug console
         self.console = setup_debug_console(debug, debug_sse, self.bind_address)
 
-        # Debug mode notification
+        # Debug mode notifications
         if debug:
             self.console.print("[yellow]Debug mode enabled - verbose logging will be written to proxy_debug.log[/yellow]")
         if debug_sse:
             self.console.print("[yellow]SSE debug mode enabled - detailed streaming events will be logged[/yellow]")
         if stream_trace_enabled:
-            self.console.print("[yellow]Stream tracing enabled - raw SSE chunks will be logged to disk (may include sensitive data).[/yellow]")
+            self.console.print("[yellow]Stream tracing enabled - raw SSE chunks will be logged to disk[/yellow]")
 
-        # Create a single event loop for the CLI session
+        # Create event loop
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
+    def clear_screen(self):
+        """Clear the terminal screen"""
+        self.console.clear()
+
+    def display_header(self):
+        """Display application header"""
+        self.console.print("\n")
+        self.console.print(Panel.fit(
+            "[bold cyan]OpenAI ChatGPT Max Proxy[/bold cyan]\n"
+            "[dim]Access GPT-5 Codex via ChatGPT Plus/Pro Subscription[/dim]",
+            border_style="cyan"
+        ))
+
+    def display_status(self):
+        """Display authentication and server status"""
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="cyan", width=20)
+        table.add_column()
+
+        # Authentication status
+        if self.token_manager.is_authenticated():
+            account_id = self.token_manager.get_account_id()
+            needs_refresh = self.token_manager.needs_refresh()
+            status = "[green]✓ Authenticated[/green]"
+            if needs_refresh:
+                status += " [yellow](refresh needed)[/yellow]"
+            table.add_row("Auth Status:", status)
+            if account_id:
+                table.add_row("Account ID:", f"[dim]{account_id[:20]}...[/dim]")
+        else:
+            table.add_row("Auth Status:", "[red]✗ Not authenticated[/red]")
+
+        # Server status
+        if self.server_running:
+            table.add_row("Server:", f"[green]✓ Running on {self.bind_address}[/green]")
+        else:
+            table.add_row("Server:", "[dim]Not running[/dim]")
+
+        self.console.print(table)
+        self.console.print()
+
+    def display_menu(self):
+        """Display main menu options"""
+        self.console.print("[bold]Main Menu:[/bold]")
+        self.console.print()
+
+        if not self.token_manager.is_authenticated():
+            self.console.print("  [cyan]1[/cyan]. Authenticate with ChatGPT")
+            self.console.print("  [dim]2. Start Proxy Server (requires authentication)[/dim]")
+            self.console.print("  [dim]3. Stop Proxy Server[/dim]")
+        else:
+            self.console.print("  [cyan]1[/cyan]. Re-authenticate (logout and login)")
+            if not self.server_running:
+                self.console.print("  [cyan]2[/cyan]. Start Proxy Server")
+                self.console.print("  [dim]3. Stop Proxy Server[/dim]")
+            else:
+                self.console.print("  [dim]2. Start Proxy Server[/dim]")
+                self.console.print("  [cyan]3[/cyan]. Stop Proxy Server")
+
+        self.console.print("  [cyan]4[/cyan]. Exit")
+        self.console.print()
+
+    async def authenticate(self):
+        """Run OpenAI OAuth authentication flow"""
+        try:
+            self.console.print("\n[bold cyan]OpenAI ChatGPT Authentication[/bold cyan]\n")
+
+            # Create authorization flow
+            flow = create_authorization_flow()
+
+            self.console.print("Starting OAuth callback server...")
+            callback_server = await start_callback_server(flow.state)
+
+            # Open browser
+            self.console.print(f"\n[bold]Opening browser to:[/bold]")
+            self.console.print(f"[dim]{flow.url}[/dim]\n")
+
+            try:
+                webbrowser.open(flow.url)
+                self.console.print("[green]✓ Browser opened[/green]")
+            except:
+                self.console.print("[yellow]⚠ Could not open browser automatically[/yellow]")
+                self.console.print("\nPlease open this URL in your browser:")
+                self.console.print(f"[cyan]{flow.url}[/cyan]\n")
+
+            # Wait for callback
+            self.console.print("Waiting for authentication...")
+            result = await callback_server.wait_for_callback(timeout=300)
+
+            # Stop callback server
+            await callback_server.stop()
+
+            if not result:
+                self.console.print("[red]✗ Authentication failed or timed out[/red]")
+                return False
+
+            # Exchange code for tokens
+            self.console.print("Exchanging authorization code for tokens...")
+            tokens = await exchange_code_for_tokens(
+                result.code,
+                flow.pkce.verifier,
+                REDIRECT_URI,
+            )
+
+            if not tokens:
+                self.console.print("[red]✗ Failed to exchange code for tokens[/red]")
+                return False
+
+            # Save tokens
+            if self.token_manager.save_tokens(tokens):
+                account_id = self.token_manager.get_account_id()
+                self.console.print("\n[bold green]✓ Authentication successful![/bold green]")
+                if account_id:
+                    self.console.print(f"[dim]Account ID: {account_id}[/dim]")
+                return True
+            else:
+                self.console.print("[red]✗ Failed to save tokens[/red]")
+                return False
+
+        except Exception as e:
+            self.console.print(f"[red]✗ Authentication error: {e}[/red]")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+            return False
+
+    def start_server(self):
+        """Start the proxy server"""
+        if self.server_running:
+            self.console.print("[yellow]Server is already running[/yellow]")
+            return
+
+        if not self.token_manager.is_authenticated():
+            self.console.print("[red]✗ Cannot start server: not authenticated[/red]")
+            return
+
+        # Refresh token if needed
+        if self.token_manager.needs_refresh():
+            self.console.print("[yellow]Refreshing access token...[/yellow]")
+            success = self.loop.run_until_complete(self.token_manager.refresh_if_needed())
+            if not success:
+                self.console.print("[red]✗ Failed to refresh token. Please re-authenticate.[/red]")
+                return
+
+        def run_server():
+            self.proxy_server.run()
+
+        self.server_thread = threading.Thread(target=run_server, daemon=True)
+        self.server_thread.start()
+        self.server_running = True
+
+        self.console.print(f"\n[bold green]✓ Proxy server started on {self.bind_address}[/bold green]\n")
+
+    def stop_server(self):
+        """Stop the proxy server"""
+        if not self.server_running:
+            self.console.print("[yellow]Server is not running[/yellow]")
+            return
+
+        self.proxy_server.stop()
+        if self.server_thread:
+            self.server_thread.join(timeout=5)
+        self.server_running = False
+
+        self.console.print("\n[green]✓ Proxy server stopped[/green]\n")
+
     def run(self):
         """Main CLI loop"""
-        import __main__
+        # Load existing tokens if available
+        self.token_manager.load_tokens()
 
         while True:
-            clear_screen(self.console)
-            display_header(self.console)
-            display_menu(self.storage, self.server_running, self.bind_address, self.console)
+            self.clear_screen()
+            self.display_header()
+            self.display_status()
+            self.display_menu()
 
-            choice = Prompt.ask("Select option [1-4]", choices=["1", "2", "3", "4"])
-
-            # Log user menu choice for debugging
-            if self.debug and hasattr(__main__, '_proxy_debug_logger'):
-                __main__._proxy_debug_logger.debug(f"[CLI] User selected menu option: {choice}")
+            choice = Prompt.ask("Select option", choices=["1", "2", "3", "4"])
 
             if choice == "1":
-                if self.server_running:
-                    self.server_running = stop_proxy_server(
-                        self.proxy_server, self.server_running, self.console, self.debug
-                    )
+                # Authenticate / Re-authenticate
+                if self.token_manager.is_authenticated():
+                    if Confirm.ask("Logout and re-authenticate?"):
+                        self.token_manager.clear_tokens()
+                        self.loop.run_until_complete(self.authenticate())
                 else:
-                    self.server_running, self.server_thread = start_proxy_server(
-                        self.proxy_server, self.storage, self.oauth, self.loop,
-                        self.console, self.bind_address, self.server_running,
-                        self.server_thread, self.debug, self.MAX_RETRIES
-                    )
+                    self.loop.run_until_complete(self.authenticate())
+                input("\nPress Enter to continue...")
+
             elif choice == "2":
-                self._handle_auth_menu()
+                # Start server
+                self.start_server()
+                input("\nPress Enter to continue...")
+
             elif choice == "3":
-                self._show_all_token_status()
+                # Stop server
+                self.stop_server()
+                input("\nPress Enter to continue...")
+
             elif choice == "4":
+                # Exit
                 if self.server_running:
-                    self.console.print("Stopping server before exit...")
-                    self.server_running = stop_proxy_server(
-                        self.proxy_server, self.server_running, self.console, self.debug
-                    )
-                # Log session end for debugging
-                if self.debug and hasattr(__main__, '_proxy_debug_logger'):
-                    __main__._proxy_debug_logger.debug("[CLI] ===== CLI SESSION ENDED =====")
-                # Clean up the event loop
-                self.loop.close()
-                self.console.print("Goodbye!")
+                    self.stop_server()
+                self.console.print("\n[cyan]Goodbye![/cyan]\n")
                 break
-
-    def _handle_auth_menu(self):
-        """Handle authentication submenu"""
-        while True:
-            clear_screen(self.console)
-            display_header(self.console)
-            display_auth_menu(self.console)
-
-            choice = Prompt.ask("Select provider [1-3]", choices=["1", "2", "3"])
-
-            if choice == "1":
-                self._handle_claude_auth_menu()
-            elif choice == "2":
-                self._handle_chatgpt_auth_menu()
-            elif choice == "3":
-                break  # Back to main menu
-
-    def _handle_claude_auth_menu(self):
-        """Handle Claude authentication menu"""
-        while True:
-            clear_screen(self.console)
-            display_header(self.console)
-            display_provider_auth_menu("Claude", self.console)
-
-            choice = Prompt.ask("Select option [1-6]", choices=["1", "2", "3", "4", "5", "6"])
-
-            if choice == "1":
-                login(self.auth_flow, self.loop, self.console, self.debug)
-            elif choice == "2":
-                refresh_token(self.storage, self.oauth, self.loop, self.console, self.debug)
-            elif choice == "3":
-                show_token_status(self.storage, self.console)
-            elif choice == "4":
-                logout(self.storage, self.console, self.debug)
-            elif choice == "5":
-                setup_long_term_token(self.storage, self.auth_flow, self.loop, self.console, self.debug)
-            elif choice == "6":
-                break  # Back to auth menu
-
-    def _handle_chatgpt_auth_menu(self):
-        """Handle ChatGPT authentication menu"""
-        while True:
-            clear_screen(self.console)
-            display_header(self.console)
-            display_provider_auth_menu("ChatGPT", self.console)
-
-            choice = Prompt.ask("Select option [1-5]", choices=["1", "2", "3", "4", "5"])
-
-            if choice == "1":
-                login_chatgpt(self.chatgpt_auth_flow, self.loop, self.console, self.debug)
-            elif choice == "2":
-                refresh_chatgpt_token(self.chatgpt_storage, self.chatgpt_oauth, self.loop, self.console, self.debug)
-            elif choice == "3":
-                self._show_chatgpt_token_status()
-            elif choice == "4":
-                logout_chatgpt(self.chatgpt_storage, self.console, self.debug)
-            elif choice == "5":
-                break  # Back to auth menu
-
-    def _show_all_token_status(self):
-        """Show token status for all providers"""
-        self.console.print("\n[bold]Claude Token Status:[/bold]")
-        show_token_status(self.storage, self.console)
-
-        self.console.print("\n[bold]ChatGPT Token Status:[/bold]")
-        self._show_chatgpt_token_status()
-
-    def _show_chatgpt_token_status(self):
-        """Show ChatGPT token status"""
-        status = self.chatgpt_storage.get_status()
-
-        if not status["has_tokens"]:
-            self.console.print("[red]No ChatGPT tokens found[/red]")
-            self.console.print("Please login first (Authentication → ChatGPT → Login)")
-        else:
-            if status["is_expired"]:
-                self.console.print("[yellow]ChatGPT Token Status: EXPIRED[/yellow]")
-            else:
-                self.console.print("[green]ChatGPT Token Status: VALID[/green]")
-
-            if status["account_id"]:
-                self.console.print(f"Account ID: {status['account_id']}")
-
-            if status["expires_at"]:
-                self.console.print(f"Expires at: {status['expires_at']}")
-
-            if status["time_until_expiry"]:
-                self.console.print(f"Time until expiry: {status['time_until_expiry']}")
-
-        self.console.print("\nPress Enter to continue...")
-        input()
 
     def run_headless_mode(self, auto_start: bool = True):
         """Run in headless mode (non-interactive)"""
-        run_headless(
-            self.proxy_server,
-            self.storage,
-            self.oauth,
-            self.loop,
-            self.console,
-            self.bind_address,
-            self.debug,
-            auto_start
-        )
+        # Load existing tokens
+        if not self.token_manager.load_tokens():
+            self.console.print("[red]ERROR: No authentication tokens found[/red]")
+            self.console.print("Please run authentication first: python cli.py")
+            return
+
+        # Refresh if needed
+        if self.token_manager.needs_refresh():
+            self.console.print("[yellow]Refreshing access token...[/yellow]")
+            success = self.loop.run_until_complete(self.token_manager.refresh_if_needed())
+            if not success:
+                self.console.print("[red]ERROR: Failed to refresh token[/red]")
+                return
+
+        # Start server if auto_start is enabled
+        if auto_start:
+            self.start_server()
+
+            # Keep running
+            try:
+                while self.server_running:
+                    import time
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]Shutting down...[/yellow]")
+                self.stop_server()
+        else:
+            self.console.print("[green]Authentication ready. Start server with option 2.[/green]")
