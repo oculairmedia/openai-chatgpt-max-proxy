@@ -223,6 +223,10 @@ async def collect_stream_to_response(
             try:
                 chunk = json.loads(data)
 
+                # Debug: Log first few chunks to understand structure
+                if not model:
+                    logger.debug(f"[{request_id}] First chunk: {json.dumps(chunk)}")
+
                 # Extract model from first chunk
                 if not model and "model" in chunk:
                     model = chunk["model"]
