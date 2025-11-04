@@ -32,18 +32,15 @@ def generate_pkce() -> PKCEPair:
     """
     Generate PKCE code verifier and challenge.
 
-    Uses the same approach as openai/codex CLI:
-    - Verifier: 128 random bytes, base64url encoded
+    RFC 7636 PKCE standard:
+    - Verifier: 43-128 characters, base64url encoded (32 bytes -> 43 chars)
     - Challenge: SHA-256 hash of verifier, base64url encoded
 
     Returns:
         PKCEPair: Tuple of (verifier, challenge)
     """
-    # Generate 128 random bytes for verifier
-    verifier_bytes = secrets.token_bytes(128)
-
-    # Base64url encode (no padding)
-    verifier = base64.urlsafe_b64encode(verifier_bytes).decode('utf-8').rstrip('=')
+    # Generate 32 random bytes -> 43 character base64url verifier
+    verifier = secrets.token_urlsafe(32)
 
     # Create SHA-256 challenge
     challenge_bytes = hashlib.sha256(verifier.encode('utf-8')).digest()
