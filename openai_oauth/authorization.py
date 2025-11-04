@@ -84,8 +84,10 @@ def create_authorization_flow() -> AuthorizationFlow:
         "state": state,
         "code_challenge": pkce.challenge,
         "code_challenge_method": "S256",
-        # OpenAI Codex CLI uses simplified flow
+        # OpenAI Codex CLI parameters (required for token exchange)
+        "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
+        "originator": "codex_cli_rs",
     }
 
     url = f"{AUTHORIZE_URL}?{urlencode(params)}"
