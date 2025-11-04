@@ -10,7 +10,7 @@ REDIRECT_URI = "http://localhost:1455/auth/callback"
 SCOPE = "openid profile email offline_access"
 
 # JWT claim path for ChatGPT account ID
-JWT_CLAIM_PATH = "https://claims.chatgpt.com"
+JWT_CLAIM_PATH = "https://api.openai.com/auth"
 CHATGPT_ACCOUNT_ID_CLAIM = "chatgpt_account_id"
 
 # OAuth callback server

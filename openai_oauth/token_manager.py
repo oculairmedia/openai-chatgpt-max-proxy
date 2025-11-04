@@ -33,18 +33,24 @@ class TokenManager:
         """
         try:
             if not self.token_file.exists():
+                print(f"Token file does not exist: {self.token_file}")
                 return False
 
             with open(self.token_file, "r") as f:
                 data = json.load(f)
 
+            print(f"Loaded token data from {self.token_file}")
             self._tokens = TokenResponse.from_dict(data)
+            print(f"Created TokenResponse from dict")
             self._account_id = extract_chatgpt_account_id(self._tokens.access_token)
+            print(f"Extracted account ID: {self._account_id}")
 
             return True
 
         except Exception as e:
             print(f"Error loading tokens: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def save_tokens(self, tokens: TokenResponse) -> bool:
