@@ -86,9 +86,17 @@ def build_codex_request(
         "stream": True,  # REQUIRED by ChatGPT backend (always streams, even for non-streaming requests)
     }
 
-    # Add system instructions if provided
+    # Add system instructions (required by Codex API)
+    # Use provided system message, or default Codex instructions
     if request.system:
         body["instructions"] = request.system
+    else:
+        # Default Codex instructions for coding tasks
+        body["instructions"] = (
+            "You are an expert AI assistant specialized in software development and coding tasks. "
+            "Provide clear, accurate, and well-structured code solutions. "
+            "Follow best practices and explain your reasoning when appropriate."
+        )
 
     # Add tools if provided
     if request.tools:
