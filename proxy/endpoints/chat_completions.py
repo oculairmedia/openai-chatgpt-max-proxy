@@ -22,8 +22,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Codex API endpoint
-CODEX_API_URL = "https://api.openai.com/v1/chat/completions"
+# Codex API endpoint (ChatGPT backend, not OpenAI Platform API)
+CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 # Global token manager with absolute path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
