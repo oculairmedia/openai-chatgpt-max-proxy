@@ -229,10 +229,14 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
     logger.debug(f"[{request_id}] Codex request: {json.dumps(codex_request, indent=2)}")
 
     # Make request to Codex API
+    # Headers based on opencode-openai-codex-auth reference
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "OpenAI-Organization": account_id,
+        "chatgpt-account-id": account_id,
+        "OpenAI-Beta": "responses=experimental",
+        "originator": "codex_cli_rs",
+        "session_id": str(uuid.uuid4()),
     }
 
     try:
