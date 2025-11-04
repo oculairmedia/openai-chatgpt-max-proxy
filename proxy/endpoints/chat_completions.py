@@ -209,6 +209,7 @@ async def collect_stream_to_response(
     finish_reason = None
     usage = None
     model = None
+    chunk_count = 0
 
     try:
         async for line in response.aiter_lines():
@@ -218,14 +219,19 @@ async def collect_stream_to_response(
             data = line[6:]  # Remove "data: " prefix
 
             if data == "[DONE]":
+                print(f"[{request_id}] Stream done. Collected {chunk_count} chunks, content length: {len(collected_content)}")
                 break
 
             try:
                 chunk = json.loads(data)
+                chunk_count += 1
 
-                # Debug: Log first few chunks to understand structure
-                if not model:
-                    logger.debug(f"[{request_id}] First chunk: {json.dumps(chunk)}")
+                # Debug: Log first chunk to understand structure
+                if chunk_count == 1:
+                    print(f"[{request_id}] First chunk structure: {json.dumps(chunk, indent=2)}")
+
+                # Log every chunk briefly
+                print(f"[{request_id}] Chunk {chunk_count}: {json.dumps(chunk)[:200]}")
 
                 # Extract model from first chunk
                 if not model and "model" in chunk:
