@@ -233,51 +233,36 @@ async def collect_stream_to_response(
                 # Log every chunk briefly
                 print(f"[{request_id}] Chunk {chunk_count}: {json.dumps(chunk)[:200]}")
 
-                # Extract model from first chunk
-                if not model and "model" in chunk:
-                    model = chunk["model"]
+                # Extract model from response object
+                if not model and "response" in chunk and "model" in chunk["response"]:
+                    model = chunk["response"]["model"]
 
-                # Collect deltas
-                if "choices" in chunk and len(chunk["choices"]) > 0:
-                    choice = chunk["choices"][0]
-                    delta = choice.get("delta", {})
+                # Handle different event types in Codex streaming format
+                event_type = chunk.get("type", "")
 
-                    # Collect content
-                    if "content" in delta and delta["content"]:
-                        collected_content += delta["content"]
+                # Collect text deltas
+                if event_type == "response.output_text.delta":
+                    delta_text = chunk.get("delta", "")
+                    if delta_text:
+                        collected_content += delta_text
+                        print(f"[{request_id}] Collected delta: '{delta_text}' (total length: {len(collected_content)})")
 
-                    # Collect tool calls
-                    if "tool_calls" in delta:
-                        for tc_delta in delta["tool_calls"]:
-                            idx = tc_delta.get("index", 0)
+                # Get final text (fallback if deltas missed)
+                elif event_type == "response.output_text.done":
+                    if "text" in chunk:
+                        # Use complete text if we didn't collect it via deltas
+                        if not collected_content:
+                            collected_content = chunk["text"]
+                            print(f"[{request_id}] Got complete text: '{collected_content}'")
 
-                            # Extend list if needed
-                            while len(collected_tool_calls) <= idx:
-                                collected_tool_calls.append({
-                                    "id": "",
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""}
-                                })
-
-                            tool_call = collected_tool_calls[idx]
-
-                            if "id" in tc_delta:
-                                tool_call["id"] = tc_delta["id"]
-                            if "type" in tc_delta:
-                                tool_call["type"] = tc_delta["type"]
-                            if "function" in tc_delta:
-                                if "name" in tc_delta["function"]:
-                                    tool_call["function"]["name"] = tc_delta["function"]["name"]
-                                if "arguments" in tc_delta["function"]:
-                                    tool_call["function"]["arguments"] += tc_delta["function"]["arguments"]
-
-                    # Get finish reason
-                    if "finish_reason" in choice and choice["finish_reason"]:
-                        finish_reason = choice["finish_reason"]
-
-                # Get usage from final chunk
-                if "usage" in chunk:
-                    usage = chunk["usage"]
+                # Handle response completion
+                elif event_type == "response.completed":
+                    if "response" in chunk:
+                        resp = chunk["response"]
+                        # Extract usage if available
+                        if "usage" in resp:
+                            usage = resp["usage"]
+                        finish_reason = "stop"
 
             except json.JSONDecodeError:
                 logger.warning(f"[{request_id}] Failed to parse SSE chunk: {data[:100]}")
