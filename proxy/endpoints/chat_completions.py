@@ -83,7 +83,7 @@ def build_codex_request(
         "model": codex_id,
         "messages": messages,
         "store": False,  # REQUIRED by ChatGPT backend
-        "stream": request.stream or False,
+        "stream": True,  # REQUIRED by ChatGPT backend (always streams, even for non-streaming requests)
     }
 
     # Add system instructions if provided
@@ -169,6 +169,125 @@ async def stream_codex_response(
         raise
 
 
+async def collect_stream_to_response(
+    response: httpx.Response,
+    request_id: str,
+) -> Dict[str, Any]:
+    """
+    Collect SSE stream from Codex API and build a complete OpenAI response.
+
+    The Codex API always streams, but clients may request non-streaming.
+    This function collects all chunks and assembles them into a complete response.
+    """
+    collected_content = ""
+    collected_tool_calls = []
+    finish_reason = None
+    usage = None
+    model = None
+
+    try:
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+
+            data = line[6:]  # Remove "data: " prefix
+
+            if data == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(data)
+
+                # Extract model from first chunk
+                if not model and "model" in chunk:
+                    model = chunk["model"]
+
+                # Collect deltas
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    choice = chunk["choices"][0]
+                    delta = choice.get("delta", {})
+
+                    # Collect content
+                    if "content" in delta and delta["content"]:
+                        collected_content += delta["content"]
+
+                    # Collect tool calls
+                    if "tool_calls" in delta:
+                        for tc_delta in delta["tool_calls"]:
+                            idx = tc_delta.get("index", 0)
+
+                            # Extend list if needed
+                            while len(collected_tool_calls) <= idx:
+                                collected_tool_calls.append({
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""}
+                                })
+
+                            tool_call = collected_tool_calls[idx]
+
+                            if "id" in tc_delta:
+                                tool_call["id"] = tc_delta["id"]
+                            if "type" in tc_delta:
+                                tool_call["type"] = tc_delta["type"]
+                            if "function" in tc_delta:
+                                if "name" in tc_delta["function"]:
+                                    tool_call["function"]["name"] = tc_delta["function"]["name"]
+                                if "arguments" in tc_delta["function"]:
+                                    tool_call["function"]["arguments"] += tc_delta["function"]["arguments"]
+
+                    # Get finish reason
+                    if "finish_reason" in choice and choice["finish_reason"]:
+                        finish_reason = choice["finish_reason"]
+
+                # Get usage from final chunk
+                if "usage" in chunk:
+                    usage = chunk["usage"]
+
+            except json.JSONDecodeError:
+                logger.warning(f"[{request_id}] Failed to parse SSE chunk: {data[:100]}")
+                continue
+
+        # Build complete response
+        complete_response = {
+            "id": f"chatcmpl-{request_id}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model or "gpt-5-codex",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": collected_content or None,
+                    },
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+        }
+
+        # Add tool_calls if any
+        if collected_tool_calls:
+            complete_response["choices"][0]["message"]["tool_calls"] = collected_tool_calls
+
+        # Add usage if available
+        if usage:
+            complete_response["usage"] = usage
+        else:
+            # Estimate usage if not provided
+            complete_response["usage"] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+
+        return complete_response
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Error collecting stream: {e}")
+        raise
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Request):
     """
@@ -241,54 +360,37 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
 
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
-            if request.stream:
-                # Streaming response
-                logger.info(f"[{request_id}] Starting streaming request to Codex API...")
+            # Codex API always returns a stream (even when client requested non-streaming)
+            logger.info(f"[{request_id}] Making request to Codex API (stream={'yes' if request.stream else 'collect'})...")
 
-                response = await client.post(
-                    CODEX_API_URL,
-                    json=codex_request,
-                    headers=headers,
-                    timeout=300.0,
+            response = await client.post(
+                CODEX_API_URL,
+                json=codex_request,
+                headers=headers,
+                timeout=300.0,
+            )
+
+            if response.status_code != 200:
+                error_text = await response.aread()
+                logger.error(f"[{request_id}] Codex API error {response.status_code}: {error_text.decode()}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Codex API error: {error_text.decode()}"
                 )
 
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    logger.error(f"[{request_id}] Codex API error {response.status_code}: {error_text}")
-                    raise HTTPException(
-                        status_code=response.status_code,
-                        detail=f"Codex API error: {error_text.decode()}"
-                    )
-
+            if request.stream:
+                # Client wants streaming - pass through the stream
                 return StreamingResponse(
                     stream_codex_response(response, request_id),
                     media_type="text/event-stream",
                 )
-
             else:
-                # Non-streaming response
-                logger.info(f"[{request_id}] Making non-streaming request to Codex API...")
-
-                response = await client.post(
-                    CODEX_API_URL,
-                    json=codex_request,
-                    headers=headers,
-                    timeout=300.0,
-                )
-
-                if response.status_code != 200:
-                    error_text = response.text
-                    logger.error(f"[{request_id}] Codex API error {response.status_code}: {error_text}")
-                    raise HTTPException(
-                        status_code=response.status_code,
-                        detail=f"Codex API error: {error_text}"
-                    )
-
-                result = response.json()
+                # Client wants non-streaming - collect the stream and return complete response
+                logger.debug(f"[{request_id}] Collecting streaming response for non-streaming client")
+                complete_response = await collect_stream_to_response(response, request_id)
                 elapsed = time.time() - start_time
                 logger.info(f"[{request_id}] Request completed in {elapsed:.2f}s")
-
-                return result
+                return complete_response
 
     except httpx.TimeoutException:
         logger.error(f"[{request_id}] Request timeout")
