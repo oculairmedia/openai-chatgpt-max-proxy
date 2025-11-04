@@ -17,6 +17,7 @@ from typing import Dict, Any, AsyncIterator
 from openai_oauth import TokenManager
 from models import resolve_model_metadata
 from ..models import OpenAIChatCompletionRequest
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,8 +25,9 @@ router = APIRouter()
 # Codex API endpoint
 CODEX_API_URL = "https://api.openai.com/v1/chat/completions"
 
-# Global token manager
-token_manager = TokenManager()
+# Global token manager with absolute path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+token_manager = TokenManager(str(PROJECT_ROOT / ".openai_tokens.json"))
 
 
 def build_codex_request(
@@ -183,7 +185,11 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
     logger.debug(f"[{request_id}] Messages: {len(request.messages)}")
 
     # Load and refresh tokens if needed
+    logger.debug(f"[{request_id}] Token file path: {token_manager.token_file}")
+    logger.debug(f"[{request_id}] Token file exists: {token_manager.token_file.exists()}")
+
     if not token_manager.load_tokens():
+        logger.error(f"[{request_id}] Failed to load tokens from {token_manager.token_file}")
         raise HTTPException(
             status_code=401,
             detail="Not authenticated. Please authenticate first."
