@@ -60,20 +60,28 @@ def build_codex_request(
     - text.verbosity
     - include: ["reasoning.encrypted_content"]
     """
-    # Convert messages to Codex format
-    messages = []
+    # Convert messages to Codex input format
+    # Codex API uses "input" array with items of type "message"
+    input_items = []
     for msg in request.messages:
-        codex_msg = {"role": msg.role}
+        input_item = {
+            "type": "message",
+            "role": msg.role,
+        }
 
         # Handle content (string or array)
         if isinstance(msg.content, str):
-            codex_msg["content"] = msg.content
+            # Convert string content to input_text format
+            input_item["content"] = [{"type": "input_text", "text": msg.content}]
         elif isinstance(msg.content, list):
-            codex_msg["content"] = msg.content
+            # Already in array format - keep as is
+            input_item["content"] = msg.content
+        else:
+            input_item["content"] = []
 
         # Add tool_calls if present
         if msg.tool_calls:
-            codex_msg["tool_calls"] = [
+            input_item["tool_calls"] = [
                 {
                     "id": tc.id,
                     "type": tc.type,
@@ -87,14 +95,14 @@ def build_codex_request(
 
         # Add tool_call_id if present (for tool response messages)
         if msg.tool_call_id:
-            codex_msg["tool_call_id"] = msg.tool_call_id
+            input_item["tool_call_id"] = msg.tool_call_id
 
-        messages.append(codex_msg)
+        input_items.append(input_item)
 
     # Build request body
     body = {
         "model": codex_id,
-        "messages": messages,
+        "input": input_items,  # Codex uses "input" not "messages"
         "store": False,  # REQUIRED by ChatGPT backend
         "stream": True,  # REQUIRED by ChatGPT backend (always streams, even for non-streaming requests)
     }
