@@ -29,6 +29,19 @@ CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 token_manager = TokenManager(str(PROJECT_ROOT / ".openai_tokens.json"))
 
+# Load Codex instructions
+CODEX_INSTRUCTIONS_FILE = PROJECT_ROOT / "codex_instructions.md"
+try:
+    with open(CODEX_INSTRUCTIONS_FILE, "r") as f:
+        CODEX_INSTRUCTIONS = f.read()
+except FileNotFoundError:
+    logger.warning(f"Codex instructions file not found at {CODEX_INSTRUCTIONS_FILE}, using default")
+    CODEX_INSTRUCTIONS = (
+        "You are an expert AI assistant specialized in software development and coding tasks. "
+        "Provide clear, accurate, and well-structured code solutions. "
+        "Follow best practices and explain your reasoning when appropriate."
+    )
+
 
 def build_codex_request(
     request: OpenAIChatCompletionRequest,
@@ -87,16 +100,12 @@ def build_codex_request(
     }
 
     # Add system instructions (required by Codex API)
-    # Use provided system message, or default Codex instructions
+    # Use provided system message, or official Codex instructions
     if request.system:
         body["instructions"] = request.system
     else:
-        # Default Codex instructions for coding tasks
-        body["instructions"] = (
-            "You are an expert AI assistant specialized in software development and coding tasks. "
-            "Provide clear, accurate, and well-structured code solutions. "
-            "Follow best practices and explain your reasoning when appropriate."
-        )
+        # Official Codex instructions from openai/codex repository
+        body["instructions"] = CODEX_INSTRUCTIONS
 
     # Add tools if provided
     if request.tools:
