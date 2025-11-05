@@ -14,6 +14,7 @@ def resolve_model_metadata(model_name: str) -> Tuple[str, str, str]:
 
     Args:
         model_name: User-provided model name (e.g., "gpt-5-codex", "gpt-5-codex-reasoning-high")
+                   Can also be in handle format "provider/model-name" which will be normalized.
 
     Returns:
         Tuple of (codex_id, reasoning_effort, text_verbosity)
@@ -27,7 +28,16 @@ def resolve_model_metadata(model_name: str) -> Tuple[str, str, str]:
 
         >>> resolve_model_metadata("gpt-5")
         ("gpt-5", "medium", "low")
+
+        >>> resolve_model_metadata("openai-proxy/gpt-5-codex")
+        ("gpt-5-codex", "medium", "medium")
     """
+    # Strip provider prefix if present (e.g., "openai-proxy/gpt-5-codex" -> "gpt-5-codex")
+    # This handles Letta's handle format: provider/model-name
+    if "/" in model_name:
+        model_name = model_name.split("/", 1)[-1]
+        logger.debug("Extracted model name from handle: %s", model_name)
+
     # Look up in registry
     entry = MODEL_REGISTRY.get(model_name)
 

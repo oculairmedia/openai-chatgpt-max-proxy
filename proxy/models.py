@@ -44,6 +44,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     model: str
     messages: List[OpenAIMessage]
     max_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None  # Accept but ignore (not supported by Codex API)
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     frequency_penalty: Optional[float] = None

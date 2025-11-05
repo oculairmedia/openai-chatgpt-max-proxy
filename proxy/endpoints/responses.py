@@ -1,8 +1,9 @@
 """
-OpenAI chat completions endpoint for GPT-5 Codex API.
+OpenAI Responses API endpoint for GPT-5 Codex API.
 
-This endpoint translates OpenAI-compatible requests to the Codex API format
-with store:false (stateless mode) as required by the ChatGPT backend.
+This endpoint implements the Responses API (/v1/responses) which is used by
+Letta and other clients for GPT-5/reasoning models. It translates Responses API
+format (with "input" field) to the same Codex API backend.
 """
 import json
 import logging
@@ -12,11 +13,11 @@ import httpx
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, AsyncIterator
+from typing import Dict, Any, List, Optional, Union, AsyncIterator
+from pydantic import BaseModel
 
 from openai_oauth import TokenManager
 from models import resolve_model_metadata
-from ..models import OpenAIChatCompletionRequest
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -43,124 +44,140 @@ except FileNotFoundError:
     )
 
 
+# Pydantic models for Responses API
+class ResponseInputItem(BaseModel):
+    """Input item in Responses API format"""
+    type: str = "message"
+    role: str
+    content: Union[str, List[Dict[str, Any]]]
+
+
+class ResponseTool(BaseModel):
+    """Tool definition in Responses API format"""
+    type: str = "function"
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ResponsesAPIRequest(BaseModel):
+    """OpenAI Responses API request format"""
+    model: str
+    input: Optional[Union[str, List[ResponseInputItem]]] = None
+    instructions: Optional[str] = None
+    tools: Optional[List[ResponseTool]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    max_output_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    stream: Optional[bool] = None
+    store: Optional[bool] = None
+    reasoning: Optional[Dict[str, Any]] = None
+    text: Optional[Dict[str, Any]] = None
+
+
 def build_codex_request(
-    request: OpenAIChatCompletionRequest,
+    request: ResponsesAPIRequest,
     codex_id: str,
     reasoning_effort: str,
     text_verbosity: str,
     account_id: str,
 ) -> Dict[str, Any]:
     """
-    Build Codex API request with store:false.
+    Build Codex API request from Responses API format.
 
-    Based on opencode-openai-codex-auth reference:
-    - store: false (required by ChatGPT backend)
-    - No message IDs (stateless mode)
-    - reasoning.effort and reasoning.summary
-    - text.verbosity
-    - include: ["reasoning.encrypted_content"]
+    Similar to chat_completions but handles "input" field instead of "messages".
     """
-    # Convert messages to Codex input format
-    # Codex API uses "input" array with items of type "message"
-    # IMPORTANT: Only include type, role, and content fields
-    # Codex API does not support tool_calls, tool_call_id, or other OpenAI-specific fields
+    # Convert input to Codex format
     input_items = []
-    for msg in request.messages:
-        # Skip tool messages - Codex API doesn't support role="tool"
-        # Skip system messages - Codex API doesn't allow system role in input (use instructions field instead)
-        # Only accepts: assistant, developer, user
-        if msg.role == "tool" or msg.role == "system":
-            continue
 
-        # Handle content (string or array)
-        if isinstance(msg.content, str):
-            # Codex API expects plain string content for input messages
-            content = msg.content
-        elif isinstance(msg.content, list):
-            # Convert array format to plain text by extracting text from content items
-            # Codex input messages don't support structured content arrays
-            text_parts = []
-            for item in msg.content:
-                if isinstance(item, dict) and "text" in item:
-                    text_parts.append(item["text"])
-                elif isinstance(item, str):
-                    text_parts.append(item)
-            content = " ".join(text_parts) if text_parts else ""
-        else:
-            content = ""
+    if request.input:
+        if isinstance(request.input, str):
+            # Simple string input - convert to single user message
+            input_items.append({
+                "type": "message",
+                "role": "user",
+                "content": request.input,
+            })
+        elif isinstance(request.input, list):
+            # Array of input items
+            for item in request.input:
+                # Skip tool and system messages (Codex doesn't support them in input)
+                if item.role in ["tool", "system"]:
+                    continue
 
-        # Build input item with ONLY the fields Codex API supports
-        # Explicitly construct a new dict to avoid any Pydantic model serialization
-        input_item = {
-            "type": "message",
-            "role": str(msg.role),  # Ensure it's a plain string
-            "content": content,
-        }
+                # Handle content (string or array)
+                if isinstance(item.content, str):
+                    content = item.content
+                elif isinstance(item.content, list):
+                    # Extract text from content items
+                    text_parts = []
+                    for content_item in item.content:
+                        if isinstance(content_item, dict) and "text" in content_item:
+                            text_parts.append(content_item["text"])
+                        elif isinstance(content_item, str):
+                            text_parts.append(content_item)
+                    content = " ".join(text_parts) if text_parts else ""
+                else:
+                    content = ""
 
-        input_items.append(input_item)
+                input_items.append({
+                    "type": "message",
+                    "role": str(item.role),
+                    "content": content,
+                })
 
     # Build request body
     body = {
         "model": codex_id,
-        "input": input_items,  # Codex uses "input" not "messages"
+        "input": input_items,
         "store": False,  # REQUIRED by ChatGPT backend
-        "stream": True,  # REQUIRED by ChatGPT backend (always streams, even for non-streaming requests)
+        "stream": True,  # REQUIRED by ChatGPT backend
     }
 
-    # Add system instructions (required by Codex API)
-    # Use provided system message, or official Codex instructions
-    if request.system:
-        body["instructions"] = request.system
+    # Add instructions (REQUIRED by Codex API)
+    # Use provided instructions, or official Codex instructions
+    if request.instructions:
+        body["instructions"] = request.instructions
     else:
         # Official Codex instructions from openai/codex repository
         body["instructions"] = CODEX_INSTRUCTIONS
 
     # Add tools if provided
     if request.tools:
-        # Codex API expects flattened tool format with name at top level
         body["tools"] = [
             {
                 "type": tool.type,
-                "name": tool.function.name,
-                "description": tool.function.description,
-                "parameters": tool.function.parameters,
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
             }
             for tool in request.tools
         ]
 
     # Add tool_choice if provided
-    # CRITICAL: Force tool_choice to "required" when tools are present
-    # Letta agents are configured to require tool calls in EVERY response
-    if request.tools:
-        body["tool_choice"] = "required"
-    elif request.tool_choice:
-        # Codex API doesn't support complex tool_choice objects
-        # Convert {"type": "function", "function": {"name": "..."}} to "auto" or simple string
-        if isinstance(request.tool_choice, str):
-            # Simple string like "auto", "required", or "none"
-            body["tool_choice"] = request.tool_choice
-        elif isinstance(request.tool_choice, dict):
-            # Complex object - simplify to "auto" for now
-            body["tool_choice"] = "auto"
+    if request.tool_choice:
+        body["tool_choice"] = request.tool_choice
 
-    # Add reasoning configuration
-    body["reasoning"] = {
-        "effort": reasoning_effort,
-        "summary": "auto",  # auto or detailed
-    }
+    # Add reasoning configuration (use from request or defaults)
+    if request.reasoning:
+        body["reasoning"] = request.reasoning
+    else:
+        body["reasoning"] = {
+            "effort": reasoning_effort,
+            "summary": "auto",
+        }
 
-    # Add text verbosity
-    body["text"] = {
-        "verbosity": text_verbosity,
-    }
+    # Add text verbosity (use from request or defaults)
+    if request.text:
+        body["text"] = request.text
+    else:
+        body["text"] = {
+            "verbosity": text_verbosity,
+        }
 
-    # Include encrypted reasoning content for context preservation
+    # Include encrypted reasoning content
     body["include"] = ["reasoning.encrypted_content"]
-
-    # Add optional parameters
-    # Note: Codex API does not support these OpenAI parameters:
-    # - max_tokens, max_output_tokens, temperature, top_p, frequency_penalty, presence_penalty, stop
-    # These are silently ignored to maintain compatibility
 
     return body
 
@@ -169,7 +186,7 @@ async def stream_codex_response(
     response: httpx.Response,
     request_id: str,
 ) -> AsyncIterator[str]:
-    """Stream SSE events from Codex API"""
+    """Stream SSE events from Codex API in Responses API format"""
     try:
         async for line in response.aiter_lines():
             if not line:
@@ -200,14 +217,10 @@ async def collect_stream_to_response(
     request_id: str,
 ) -> Dict[str, Any]:
     """
-    Collect SSE stream from Codex API and build a complete OpenAI response.
-
-    The Codex API always streams, but clients may request non-streaming.
-    This function collects all chunks and assembles them into a complete response.
+    Collect SSE stream from Codex API and build a complete Responses API response.
     """
     collected_content = ""
     collected_tool_calls = []
-    # Track function calls by item_id
     function_calls = {}  # item_id -> {name, arguments}
     finish_reason = None
     usage = None
@@ -222,19 +235,12 @@ async def collect_stream_to_response(
             data = line[6:]  # Remove "data: " prefix
 
             if data == "[DONE]":
-                print(f"[{request_id}] Stream done. Collected {chunk_count} chunks, content length: {len(collected_content)}")
+                logger.debug(f"[{request_id}] Stream done. Collected {chunk_count} chunks")
                 break
 
             try:
                 chunk = json.loads(data)
                 chunk_count += 1
-
-                # Debug: Log first chunk to understand structure
-                if chunk_count == 1:
-                    print(f"[{request_id}] First chunk structure: {json.dumps(chunk, indent=2)}")
-
-                # Log every chunk briefly
-                print(f"[{request_id}] Chunk {chunk_count}: {json.dumps(chunk)[:200]}")
 
                 # Extract model from response object
                 if not model and "response" in chunk and "model" in chunk["response"]:
@@ -248,15 +254,11 @@ async def collect_stream_to_response(
                     delta_text = chunk.get("delta", "")
                     if delta_text:
                         collected_content += delta_text
-                        print(f"[{request_id}] Collected delta: '{delta_text}' (total length: {len(collected_content)})")
 
                 # Get final text (fallback if deltas missed)
                 elif event_type == "response.output_text.done":
-                    if "text" in chunk:
-                        # Use complete text if we didn't collect it via deltas
-                        if not collected_content:
-                            collected_content = chunk["text"]
-                            print(f"[{request_id}] Got complete text: '{collected_content}'")
+                    if "text" in chunk and not collected_content:
+                        collected_content = chunk["text"]
 
                 # Handle function call creation
                 elif event_type == "response.output_item.added":
@@ -268,7 +270,6 @@ async def collect_stream_to_response(
                                 "name": item.get("name", ""),
                                 "arguments": ""
                             }
-                            print(f"[{request_id}] Function call started: {item.get('name')}")
 
                 # Handle function call arguments delta
                 elif event_type == "response.function_call_arguments.delta":
@@ -282,17 +283,14 @@ async def collect_stream_to_response(
                     item_id = chunk.get("item_id")
                     arguments = chunk.get("arguments", "")
                     if item_id and item_id in function_calls:
-                        # Use final arguments (should match accumulated deltas)
                         function_calls[item_id]["arguments"] = arguments
-                        print(f"[{request_id}] Function call completed: {function_calls[item_id]['name']}")
 
-                # Handle output item completion - extract function name if available
+                # Handle output item completion
                 elif event_type == "response.output_item.done":
                     item = chunk.get("item", {})
                     if item.get("type") == "function_call":
                         item_id = item.get("id")
                         if item_id and item_id in function_calls:
-                            # Update function name from completed item
                             if "name" in item:
                                 function_calls[item_id]["name"] = item["name"]
 
@@ -300,7 +298,6 @@ async def collect_stream_to_response(
                 elif event_type == "response.completed":
                     if "response" in chunk:
                         resp = chunk["response"]
-                        # Extract usage if available
                         if "usage" in resp:
                             usage = resp["usage"]
                         finish_reason = "stop"
@@ -309,54 +306,53 @@ async def collect_stream_to_response(
                 logger.warning(f"[{request_id}] Failed to parse SSE chunk: {data[:100]}")
                 continue
 
-        # Convert Codex function calls to OpenAI tool_calls format
+        # Convert Codex function calls to Responses API tool_calls format
+        output_items = []
+
+        logger.debug(f"[{request_id}] === COLLECTION COMPLETE ===")
+        logger.debug(f"[{request_id}] Collected content length: {len(collected_content)}")
+        logger.debug(f"[{request_id}] Function calls collected: {len(function_calls)}")
+        logger.debug(f"[{request_id}] Function calls: {json.dumps(function_calls, indent=2)}")
+
+        # Add message item if there's content
+        if collected_content:
+            output_items.append({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": collected_content}]
+            })
+            logger.debug(f"[{request_id}] Added message item with content")
+
+        # Add function call items
         for idx, (item_id, func_call) in enumerate(function_calls.items()):
             if func_call["name"]:
-                collected_tool_calls.append({
-                    "id": f"call_{item_id[-24:]}",  # Use last 24 chars of item_id
-                    "type": "function",
-                    "function": {
-                        "name": func_call["name"],
-                        "arguments": func_call["arguments"]
-                    }
+                output_items.append({
+                    "id": item_id,
+                    "type": "function_call",
+                    "name": func_call["name"],
+                    "arguments": func_call["arguments"]
                 })
+                logger.debug(f"[{request_id}] Added function call: {func_call['name']}")
 
-        # Update finish_reason if tool calls were made
-        if collected_tool_calls:
-            finish_reason = "tool_calls"
+        logger.debug(f"[{request_id}] Total output items: {len(output_items)}")
 
-        # Build complete response
+        # Build complete response in Responses API format
         complete_response = {
-            "id": f"chatcmpl-{request_id}",
-            "object": "chat.completion",
-            "created": int(time.time()),
+            "id": f"resp-{request_id}",
+            "object": "response",
+            "created_at": int(time.time()),
             "model": model or "gpt-5-codex",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": collected_content or None,
-                    },
-                    "finish_reason": finish_reason or "stop",
-                }
-            ],
+            "output": output_items,
         }
-
-        # Add tool_calls if any
-        if collected_tool_calls:
-            complete_response["choices"][0]["message"]["tool_calls"] = collected_tool_calls
 
         # Add usage - ensure all fields are integers
         if usage and isinstance(usage, dict):
-            # Ensure all token counts are integers, default to 0 if missing
             complete_response["usage"] = {
                 "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                 "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
                 "total_tokens": int(usage.get("total_tokens", 0) or 0),
             }
         else:
-            # Default usage if not provided
             complete_response["usage"] = {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
@@ -370,27 +366,26 @@ async def collect_stream_to_response(
         raise
 
 
-@router.post("/v1/chat/completions")
-async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Request):
+@router.post("/v1/responses")
+async def responses_create(request: ResponsesAPIRequest, raw_request: Request):
     """
-    OpenAI-compatible chat completions endpoint for GPT-5 Codex.
+    OpenAI-compatible Responses API endpoint for GPT-5 Codex.
 
-    Translates OpenAI format to Codex API with store:false (stateless mode).
+    Translates Responses API format (with "input" field) to Codex API.
     """
     request_id = str(uuid.uuid4())[:8]
     start_time = time.time()
 
-    logger.info(f"[{request_id}] ===== NEW CHAT COMPLETION REQUEST =====")
+    logger.info(f"[{request_id}] ===== NEW RESPONSES API REQUEST =====")
     logger.debug(f"[{request_id}] Model: {request.model}")
     logger.debug(f"[{request_id}] Stream: {request.stream}")
-    logger.debug(f"[{request_id}] Messages: {len(request.messages)}")
+    logger.debug(f"[{request_id}] Has input: {request.input is not None}")
+    logger.debug(f"[{request_id}] Tools: {request.tools}")
+    logger.debug(f"[{request_id}] Tool choice: {request.tool_choice}")
 
     # Load and refresh tokens if needed
-    logger.debug(f"[{request_id}] Token file path: {token_manager.token_file}")
-    logger.debug(f"[{request_id}] Token file exists: {token_manager.token_file.exists()}")
-
     if not token_manager.load_tokens():
-        logger.error(f"[{request_id}] Failed to load tokens from {token_manager.token_file}")
+        logger.error(f"[{request_id}] Failed to load tokens")
         raise HTTPException(
             status_code=401,
             detail="Not authenticated. Please authenticate first."
@@ -430,7 +425,6 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
     logger.debug(f"[{request_id}] Codex request: {json.dumps(codex_request, indent=2)}")
 
     # Make request to Codex API
-    # Headers based on opencode-openai-codex-auth reference
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -442,7 +436,6 @@ async def chat_completions(request: OpenAIChatCompletionRequest, raw_request: Re
 
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
-            # Codex API always returns a stream (even when client requested non-streaming)
             logger.info(f"[{request_id}] Making request to Codex API (stream={'yes' if request.stream else 'collect'})...")
 
             response = await client.post(

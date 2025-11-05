@@ -10,6 +10,7 @@ from .endpoints import (
     models_router,
 )
 from .endpoints.chat_completions import router as chat_completions_router
+from .endpoints.responses import router as responses_router
 
 logger = logging.getLogger(__name__)
 
@@ -23,5 +24,6 @@ app.middleware("http")(log_requests_middleware)
 app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(chat_completions_router)
+app.include_router(responses_router)
 
 logger.debug("FastAPI application initialized with all routers and middleware")
