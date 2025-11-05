@@ -8,6 +8,7 @@ router = APIRouter()
 
 
 @router.get("/v1/models")
+@router.get("/models")
 async def list_models():
     """OpenAI-compatible models endpoint with reasoning variants"""
     return {

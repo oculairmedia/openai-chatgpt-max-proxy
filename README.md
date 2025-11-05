@@ -32,8 +32,27 @@ Sister project to [anthropic-claude-max-proxy](https://github.com/oculairmedia/a
 git clone https://github.com/oculairmedia/openai-chatgpt-max-proxy.git
 cd openai-chatgpt-max-proxy
 pip install -r requirements.txt
-python cli.py  # Authenticate
-python cli.py --headless  # Start proxy on port 8083
+python3 cli.py  # Authenticate
+python3 cli.py --headless  # Start proxy on port 8084
+```
+
+## Starting the Proxy
+
+After initial authentication, start the proxy server:
+
+```bash
+cd /opt/stacks/openai-chatgpt-max-proxy
+nohup python3 cli.py --headless > proxy.log 2>&1 &
+```
+
+The proxy will run on port 8084 and provide OpenAI-compatible endpoints:
+- `/v1/models` - List available models
+- `/models` - Alias for `/v1/models` (Letta compatibility)
+- `/v1/chat/completions` - Chat completions endpoint
+
+To check if it's running:
+```bash
+curl http://192.168.50.90:8084/models
 ```
 
 ## Status
